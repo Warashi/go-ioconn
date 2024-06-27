@@ -93,15 +93,36 @@ func (c *Conn) writeStream(remote, local uint64, b []byte) (n int, err error) {
 	return int(p.length), nil
 }
 
-func (c *Conn) writePacket(p *packet) (n int, err error) {
-	b, err := p.MarshalBinary()
+func (c *Conn) closeStream(remote, local uint64) (err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	info, ok := c.writeInfo[port{
+		remote: remote,
+		local:  local,
+	}]
+	if !ok {
+		return nil
+	}
+
+	p := &packet{
+		packetType:      fin,
+		sourcePort:      local,
+		destinationPort: remote,
+	}
+
+	mb, err := p.MarshalBinary()
 	if err != nil {
-		return 0, err
+		return err
 	}
-	if _, err := c.rw.Write(b); err != nil {
-		return 0, err
+
+	if _, err := c.rw.Write(mb); err != nil {
+		return err
 	}
-	return int(p.length), nil
+
+	info.closed = true
+
+	return nil
 }
 
 type readBuffer struct {
@@ -152,6 +173,10 @@ func (s *Stream) Read(b []byte) (n int, err error) {
 
 func (s *Stream) Write(b []byte) (n int, err error) {
 	return s.conn.writeStream(s.remotePort, s.localPort, b)
+}
+
+func (s *Stream) Close() (err error) {
+	return s.conn.closeStream(s.remotePort, s.localPort)
 }
 
 type packet struct {
