@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"net"
+	"strconv"
 	"sync"
 )
 
@@ -16,10 +18,10 @@ var (
 type packetType uint8
 
 const (
-	undefined packetType = 0
-	data      packetType = 1
-	fin       packetType = 2
-	finAck    packetType = 3
+	undefined packetType = iota
+	ack
+	fin
+	data
 )
 
 var endian = binary.BigEndian
@@ -29,8 +31,107 @@ type Conn struct {
 
 	mu sync.Mutex
 
+	listener  map[uint64]*Listener
+	usedPort  map[uint64]struct{}
 	readBuf   map[port]*readBuffer
 	writeInfo map[port]*writeInfo
+}
+
+func (c *Conn) Listen(port uint64) (net.Listener, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.usedPort[port] = struct{}{}
+
+	l := &Listener{
+		port: port,
+		ack:  make(chan *packet),
+		done: make(chan struct{}),
+	}
+
+	c.listener[port] = l
+
+	return l, nil
+}
+
+type Listener struct {
+  conn *Conn
+
+	port uint64
+	ack  chan *packet
+	done chan struct{}
+}
+
+func (l *Listener) Accept() (net.Conn, error) {
+	select {
+	case ack := <-l.ack:
+    return &Stream{
+      conn: l.conn,
+      localPort: l.port,
+      remotePort: ack.sourcePort,
+    }, nil 
+  case <-l.done:
+    return nil, net.ErrClosed
+	}
+}
+
+func (l *Listener) Close() error {
+  close(l.done) 
+  return nil
+}
+
+func (l *Listener) Addr() net.Addr {
+	return Addr{port: l.port}
+}
+
+type Addr struct {
+	port uint64
+}
+
+func (a Addr) Network() string {
+	return "ioconn"
+}
+
+func (a Addr) String() string {
+	return "ioconn:" + strconv.FormatUint(a.port, 10)
+}
+
+func (c *Conn) Dial(dest uint64) (net.Conn, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	local := uint64(math.MaxUint64)
+	for i := range uint64(math.MaxUint64) {
+		if _, ok := c.usedPort[i]; !ok {
+			c.usedPort[i] = struct{}{}
+			local = i
+			break
+		}
+	}
+
+	p := &packet{
+		packetType:      ack,
+		sourcePort:      local,
+		destinationPort: dest,
+	}
+
+	if err := c.writePacket(p); err != nil {
+		return nil, err
+	}
+
+	pkey := port{
+		remote: dest,
+		local:  local,
+	}
+
+	c.readBuf[pkey] = new(readBuffer)
+	c.writeInfo[pkey] = new(writeInfo)
+
+	return &Stream{
+		conn:       c,
+		localPort:  local,
+		remotePort: dest,
+	}, nil
 }
 
 type port struct {
@@ -41,6 +142,19 @@ type port struct {
 type writeInfo struct {
 	closed bool
 	offset uint64
+}
+
+func (c *Conn) writePacket(p *packet) error {
+	mb, err := p.MarshalBinary()
+	if err != nil {
+		return err
+	}
+
+	if _, err := c.rw.Write(mb); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (c *Conn) readStream(remote, local uint64, b []byte) (n int, err error) {
@@ -79,12 +193,7 @@ func (c *Conn) writeStream(remote, local uint64, b []byte) (n int, err error) {
 		data:            b,
 	}
 
-	mb, err := p.MarshalBinary()
-	if err != nil {
-		return 0, err
-	}
-
-	if _, err := c.rw.Write(mb); err != nil {
+	if err := c.writePacket(p); err != nil {
 		return 0, err
 	}
 
@@ -97,10 +206,11 @@ func (c *Conn) closeStream(remote, local uint64) (err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	info, ok := c.writeInfo[port{
+	pkey := port{
 		remote: remote,
 		local:  local,
-	}]
+	}
+	info, ok := c.writeInfo[pkey]
 	if !ok {
 		return nil
 	}
@@ -111,12 +221,7 @@ func (c *Conn) closeStream(remote, local uint64) (err error) {
 		destinationPort: remote,
 	}
 
-	mb, err := p.MarshalBinary()
-	if err != nil {
-		return err
-	}
-
-	if _, err := c.rw.Write(mb); err != nil {
+	if err := c.writePacket(p); err != nil {
 		return err
 	}
 
@@ -130,7 +235,7 @@ type readBuffer struct {
 	buf        bytes.Buffer
 	mu         sync.Mutex
 	offset     uint64
-	reorderBuf []*packet // not used when writing
+	reorderBuf []*packet
 }
 
 func (b *readBuffer) Read(by []byte) (n int, err error) {
@@ -161,7 +266,7 @@ func (b *readBuffer) Close() error {
 
 type Stream struct {
 	net.Conn
-	conn Conn
+	conn *Conn
 
 	localPort  uint64
 	remotePort uint64
