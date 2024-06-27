@@ -20,7 +20,9 @@ type packetType uint8
 const (
 	undefined packetType = iota
 	ack
+  synAck
 	fin
+  finAck
 	data
 )
 
@@ -35,6 +37,35 @@ type Conn struct {
 	usedPort  map[uint64]struct{}
 	readBuf   map[port]*readBuffer
 	writeInfo map[port]*writeInfo
+}
+
+type readWriter struct {
+	io.Reader
+	io.Writer
+}
+
+func NewConn(w io.Writer, r io.Reader) *Conn {
+	c := &Conn{
+		rw: readWriter{
+			Reader: r,
+			Writer: w,
+		},
+
+		listener: make(map[uint64]*Listener),
+		usedPort: make(map[uint64]struct{}),
+    readBuf: make(map[port]*readBuffer),
+    writeInfo: make(map[port]*writeInfo),
+	}
+
+  go c.run()
+
+	return c
+}
+
+func (c *Conn) run() {
+  for {
+
+  }
 }
 
 func (c *Conn) Listen(port uint64) (net.Listener, error) {
@@ -55,7 +86,7 @@ func (c *Conn) Listen(port uint64) (net.Listener, error) {
 }
 
 type Listener struct {
-  conn *Conn
+	conn *Conn
 
 	port uint64
 	ack  chan *packet
@@ -65,19 +96,19 @@ type Listener struct {
 func (l *Listener) Accept() (net.Conn, error) {
 	select {
 	case ack := <-l.ack:
-    return &Stream{
-      conn: l.conn,
-      localPort: l.port,
-      remotePort: ack.sourcePort,
-    }, nil 
-  case <-l.done:
-    return nil, net.ErrClosed
+		return &Stream{
+			conn:       l.conn,
+			localPort:  l.port,
+			remotePort: ack.sourcePort,
+		}, nil
+	case <-l.done:
+		return nil, net.ErrClosed
 	}
 }
 
 func (l *Listener) Close() error {
-  close(l.done) 
-  return nil
+	close(l.done)
+	return nil
 }
 
 func (l *Listener) Addr() net.Addr {
