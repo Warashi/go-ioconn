@@ -5,8 +5,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log"
 	"math"
 	"net"
+	"slices"
 	"strconv"
 	"sync"
 )
@@ -20,9 +22,9 @@ type packetType uint8
 const (
 	undefined packetType = iota
 	ack
-  synAck
+	synAck
 	fin
-  finAck
+	finAck
 	data
 )
 
@@ -51,21 +53,50 @@ func NewConn(w io.Writer, r io.Reader) *Conn {
 			Writer: w,
 		},
 
-		listener: make(map[uint64]*Listener),
-		usedPort: make(map[uint64]struct{}),
-    readBuf: make(map[port]*readBuffer),
-    writeInfo: make(map[port]*writeInfo),
+		listener:  make(map[uint64]*Listener),
+		usedPort:  make(map[uint64]struct{}),
+		readBuf:   make(map[port]*readBuffer),
+		writeInfo: make(map[port]*writeInfo),
 	}
 
-  go c.run()
+	go c.run()
 
 	return c
 }
 
 func (c *Conn) run() {
-  for {
+	for {
+		p, err := readPacket(c.rw)
+		if err != nil {
+			log.Printf("error while reading packet: %v\n", err)
+			continue
+		}
 
-  }
+		if buf, ok := c.readBuf[port{remote: p.sourcePort, local: p.destinationPort}]; ok {
+			if err := buf.writePacket(p); err != nil {
+				log.Printf("error while writing packet: %v\n", err)
+        continue
+			}
+		}
+
+		if p.packetType == ack {
+			if listener, ok := c.listener[p.destinationPort]; ok {
+				go func() {
+          if err := c.writePacket(&packet{
+						packetType:      synAck,
+
+            // invert them
+						sourcePort:      p.destinationPort,
+						destinationPort: p.sourcePort,
+					}); err != nil {
+            return
+          }
+
+					listener.ack <- p
+				}()
+			}
+		}
+	}
 }
 
 func (c *Conn) Listen(port uint64) (net.Listener, error) {
@@ -95,7 +126,10 @@ type Listener struct {
 
 func (l *Listener) Accept() (net.Conn, error) {
 	select {
-	case ack := <-l.ack:
+	case ack, ok := <-l.ack:
+		if !ok {
+			return nil, net.ErrClosed
+		}
 		return &Stream{
 			conn:       l.conn,
 			localPort:  l.port,
@@ -107,6 +141,7 @@ func (l *Listener) Accept() (net.Conn, error) {
 }
 
 func (l *Listener) Close() error {
+	delete(l.conn.listener, l.port)
 	close(l.done)
 	return nil
 }
@@ -265,8 +300,40 @@ type readBuffer struct {
 	closed     bool
 	buf        bytes.Buffer
 	mu         sync.Mutex
-	offset     uint64
+	nextOffset uint64
 	reorderBuf []*packet
+}
+
+func (b *readBuffer) writePacket(p *packet) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if p.offset != b.nextOffset {
+		b.reorderBuf = append(b.reorderBuf, p)
+		return nil
+	}
+
+	if _, err := b.buf.Write(p.data); err != nil {
+		return err
+	}
+	b.nextOffset = p.offset + uint64(p.length)
+
+	slices.SortFunc(b.reorderBuf, func(a, b *packet) int {
+		return int(a.offset) - int(b.offset)
+	})
+
+	for _, p := range b.reorderBuf {
+		if p.offset != b.nextOffset {
+			return nil
+		}
+
+		if _, err := b.buf.Write(p.data); err != nil {
+			return err
+		}
+		b.nextOffset = p.offset + uint64(p.length)
+	}
+
+	return nil
 }
 
 func (b *readBuffer) Read(by []byte) (n int, err error) {
@@ -282,77 +349,9 @@ func (b *readBuffer) Read(by []byte) (n int, err error) {
 	return n, nil
 }
 
-func (b *readBuffer) Write(by []byte) (n int, err error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(by)
-}
-
 func (b *readBuffer) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
-	return nil
-}
-
-type Stream struct {
-	net.Conn
-	conn *Conn
-
-	localPort  uint64
-	remotePort uint64
-}
-
-func (s *Stream) Read(b []byte) (n int, err error) {
-	return s.conn.readStream(s.remotePort, s.localPort, b)
-}
-
-func (s *Stream) Write(b []byte) (n int, err error) {
-	return s.conn.writeStream(s.remotePort, s.localPort, b)
-}
-
-func (s *Stream) Close() (err error) {
-	return s.conn.closeStream(s.remotePort, s.localPort)
-}
-
-type packet struct {
-	packetType      packetType
-	sourcePort      uint64
-	destinationPort uint64
-	offset          uint64
-	length          uint16
-	data            []byte
-}
-
-func (p *packet) MarshalBinary() ([]byte, error) {
-	if int(p.length) != len(p.data) {
-		return nil, errors.New("data length is invalid")
-	}
-
-	data := make([]byte, 0, 27+p.length)
-
-	data = append(data, byte(p.packetType))
-	data = endian.AppendUint64(data, p.sourcePort)
-	data = endian.AppendUint64(data, p.destinationPort)
-	data = endian.AppendUint64(data, p.offset)
-	data = endian.AppendUint16(data, p.length)
-	data = append(data, data[:p.length]...)
-
-	return data, nil
-}
-
-func (p *packet) UnmarshalBinary(data []byte) error {
-	p.length = endian.Uint16(data[25:27])
-
-	if int(19+p.length) != len(data) {
-		return errors.New("data length is invalid")
-	}
-
-	p.packetType = packetType(data[0])
-	p.sourcePort = endian.Uint64(data[1:9])
-	p.destinationPort = endian.Uint64(data[9:17])
-	p.offset = endian.Uint64(data[17:25])
-	copy(p.data, data[27:])
-
 	return nil
 }
