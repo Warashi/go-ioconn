@@ -53,8 +53,11 @@ type Stream struct {
 
 	closed atomic.Bool
 
-	mu  sync.Mutex
-	buf bytes.Buffer
+	written uint64
+	writeMu sync.Mutex
+
+	readMu sync.Mutex
+	buf    bytes.Buffer
 
 	queue queue[*packet]
 
@@ -70,8 +73,8 @@ func (s *Stream) pushQueue(p *packet) {
 }
 
 func (s *Stream) Read(b []byte) (n int, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
 
 	defer func() {
 		if s.buf.Len() == 0 {
@@ -97,10 +100,18 @@ func (s *Stream) Read(b []byte) (n int, err error) {
 }
 
 func (s *Stream) Write(b []byte) (n int, err error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	if s.closed.Load() {
 		return 0, net.ErrClosed
 	}
-	return s.conn.writeStream(s.remotePort, s.localPort, b)
+	if err := s.conn.writePacket(newDataPacket(s.localPort, s.remotePort, s.written, b)); err != nil {
+		return 0, err
+	}
+	s.written += uint64(len(b))
+
+	return len(b), nil
 }
 
 func (s *Stream) Close() (err error) {

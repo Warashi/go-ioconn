@@ -22,10 +22,7 @@ type Conn struct {
 	w  io.Writer
 	mu sync.Mutex
 
-	writeInfo map[port]*writeInfo
-
-	stream map[port]*Stream
-
+	stream   map[port]*Stream
 	listener map[uint64]*Listener
 	usedPort map[uint64]struct{}
 }
@@ -35,10 +32,9 @@ func NewConn(w io.Writer, r io.Reader) *Conn {
 		r: r,
 		w: w,
 
-		stream:    make(map[port]*Stream),
-		listener:  make(map[uint64]*Listener),
-		usedPort:  make(map[uint64]struct{}),
-		writeInfo: make(map[port]*writeInfo),
+		stream:   make(map[port]*Stream),
+		listener: make(map[uint64]*Listener),
+		usedPort: make(map[uint64]struct{}),
 	}
 
 	go c.run()
@@ -73,7 +69,6 @@ func (c *Conn) next() bool {
 					local:  p.destinationPort,
 				}
 
-				c.writeInfo[pkey] = new(writeInfo)
 				c.stream[pkey] = new(Stream)
 
 				listener.ack <- p
@@ -198,11 +193,6 @@ func (c *Conn) Dial(dest uint64) (net.Conn, error) {
 		return nil, err
 	}
 
-	pkey := port{
-		remote: dest,
-		local:  local,
-	}
-
 	s := &Stream{
 		conn:       c,
 		localPort:  local,
@@ -210,19 +200,12 @@ func (c *Conn) Dial(dest uint64) (net.Conn, error) {
 	}
 	c.registerStream(s)
 
-	c.writeInfo[pkey] = new(writeInfo)
-
 	return s, nil
 }
 
 type port struct {
 	remote uint64
 	local  uint64
-}
-
-type writeInfo struct {
-	closed bool
-	offset uint64
 }
 
 func (c *Conn) writePacket(p *packet) error {
@@ -236,32 +219,6 @@ func (c *Conn) writePacket(p *packet) error {
 	}
 
 	return nil
-}
-
-func (c *Conn) writeStream(remote, local uint64, b []byte) (n int, err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	info, ok := c.writeInfo[port{
-		remote: remote,
-		local:  local,
-	}]
-	if !ok {
-		return 0, io.EOF
-	}
-
-	p := newPacket(data, local, remote)
-	p.offset = info.offset
-	p.length = uint16(len(b))
-	p.data = b
-
-	if err := c.writePacket(p); err != nil {
-		return 0, err
-	}
-
-	info.offset += uint64(p.length)
-
-	return int(p.length), nil
 }
 
 func (c *Conn) sendFin(remote, local uint64) (err error) {
@@ -282,11 +239,6 @@ func (c *Conn) closeStream(remote, local uint64) (err error) {
 	s, ok := c.stream[pkey]
 	if ok {
 		s.closed.Store(true)
-	}
-
-	info, ok := c.writeInfo[pkey]
-	if ok {
-		info.closed = true
 	}
 
 	return nil

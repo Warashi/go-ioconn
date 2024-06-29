@@ -35,6 +35,15 @@ func newPacket(typ packetType, local, remote uint64) *packet {
 	}
 }
 
+func newDataPacket(local, remote, offset uint64, b []byte) *packet {
+	p := newPacket(data, local, remote)
+	p.offset = offset
+	p.length = uint16(len(b))
+	p.data = b
+
+	return p
+}
+
 func readPacket(r io.Reader) (*packet, error) {
 	var header [17]byte
 	if _, err := r.Read(header[:]); err != nil {
