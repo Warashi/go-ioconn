@@ -61,23 +61,13 @@ func (c *Conn) next() bool {
 	case ack:
 		if listener, ok := c.listener[p.destinationPort]; ok {
 			go func() {
-				c.mu.Lock()
-				defer c.mu.Unlock()
-
-				pkey := port{
-					remote: p.sourcePort,
-					local:  p.destinationPort,
-				}
-
-				c.stream[pkey] = new(Stream)
-
 				listener.ack <- p
 			}()
 		}
 	case synAck:
 	case fin:
 		go func() {
-			defer c.closeStream(p.sourcePort, p.destinationPort)
+			c.closeStream(p.sourcePort, p.destinationPort)
 			if err := c.writePacket(newPacket(
 				finAck,
 				p.destinationPort,
