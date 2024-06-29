@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"testing"
 
 	"github.com/Warashi/go-ioconn"
@@ -76,5 +75,13 @@ func TestHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	io.Copy(os.Stderr, r.Body)
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := string(body), "404 page not found\n"; want != got {
+		t.Errorf("want = %v, got = %v", want, got)
+	}
 }
