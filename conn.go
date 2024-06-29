@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"github.com/k0kubun/pp/v3"
 )
 
 var (
@@ -329,8 +327,6 @@ func (b *readBuffer) writePacket(p *packet) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	pp.Println(b)
-	pp.Println(p)
 	if p.offset != b.nextOffset {
 		b.reorderBuf = append(b.reorderBuf, p)
 		return nil
