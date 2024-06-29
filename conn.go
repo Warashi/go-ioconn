@@ -22,15 +22,15 @@ var endian = binary.BigEndian
 
 type Conn struct {
 	r      io.Reader
-	readMu sync.Mutex
+	readBufMu sync.Mutex
+	readBuf   map[port]*readBuffer
 
 	w       io.Writer
-	writeMu sync.Mutex
+	writeInfoMu sync.Mutex
+	writeInfo map[port]*writeInfo
 
 	listener  map[uint64]*Listener
 	usedPort  map[uint64]struct{}
-	readBuf   map[port]*readBuffer
-	writeInfo map[port]*writeInfo
 }
 
 type readWriter struct {
@@ -121,10 +121,10 @@ func (c *Conn) run() {
 }
 
 func (c *Conn) Listen(port uint64) (net.Listener, error) {
-	c.readMu.Lock()
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	defer c.readMu.Unlock()
+	c.readBufMu.Lock()
+	c.writeInfoMu.Lock()
+	defer c.writeInfoMu.Unlock()
+	defer c.readBufMu.Unlock()
 
 	c.usedPort[port] = struct{}{}
 
@@ -187,10 +187,10 @@ func (a Addr) String() string {
 }
 
 func (c *Conn) Dial(dest uint64) (net.Conn, error) {
-	c.readMu.Lock()
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	defer c.readMu.Unlock()
+	c.readBufMu.Lock()
+	c.writeInfoMu.Lock()
+	defer c.writeInfoMu.Unlock()
+	defer c.readBufMu.Unlock()
 
 	local := uint64(math.MaxUint64)
 	for i := range uint64(math.MaxUint64) {
@@ -244,8 +244,8 @@ func (c *Conn) writePacket(p *packet) error {
 }
 
 func (c *Conn) readStream(remote, local uint64, b []byte) (n int, err error) {
-	c.readMu.Lock()
-	defer c.readMu.Unlock()
+	c.readBufMu.Lock()
+	defer c.readBufMu.Unlock()
 
 	buf, ok := c.readBuf[port{
 		remote: remote,
@@ -264,8 +264,8 @@ func (c *Conn) readStream(remote, local uint64, b []byte) (n int, err error) {
 }
 
 func (c *Conn) writeStream(remote, local uint64, b []byte) (n int, err error) {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	c.writeInfoMu.Lock()
+	defer c.writeInfoMu.Unlock()
 
 	info, ok := c.writeInfo[port{
 		remote: remote,
@@ -297,8 +297,8 @@ func (c *Conn) sendFin(remote, local uint64) (err error) {
 }
 
 func (c *Conn) closeStream(remote, local uint64) (err error) {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	c.writeInfoMu.Lock()
+	defer c.writeInfoMu.Unlock()
 
 	pkey := port{
 		remote: remote,
