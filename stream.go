@@ -23,9 +23,9 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 }
 
 func (s *Stream) Close() (err error) {
-  if err := s.conn.sendFin(s.remotePort, s.localPort); err != nil {
-    return err
-  }
+	if err := s.conn.sendFin(s.remotePort, s.localPort); err != nil {
+		return err
+	}
 	return s.conn.closeStream(s.remotePort, s.localPort)
 }
 

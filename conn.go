@@ -23,8 +23,8 @@ var endian = binary.BigEndian
 type Conn struct {
 	rw io.ReadWriter
 
-  readMu sync.Mutex
-  writeMu sync.Mutex
+	readMu  sync.Mutex
+	writeMu sync.Mutex
 
 	listener  map[uint64]*Listener
 	usedPort  map[uint64]struct{}
@@ -123,7 +123,7 @@ func (c *Conn) run() {
 
 func (c *Conn) Listen(port uint64) (net.Listener, error) {
 	c.readMu.Lock()
-  c.writeMu.Lock()
+	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	defer c.readMu.Unlock()
 
@@ -189,7 +189,7 @@ func (a Addr) String() string {
 
 func (c *Conn) Dial(dest uint64) (net.Conn, error) {
 	c.readMu.Lock()
-  c.writeMu.Lock()
+	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	defer c.readMu.Unlock()
 

@@ -71,10 +71,10 @@ func TestHTTP(t *testing.T) {
 			},
 		},
 	}
-  
-  r, err := c.Get("http://example.com")
-  if err != nil {
-    t.Fatal(err)
-  }
-  io.Copy(os.Stderr, r.Body)
+
+	r, err := c.Get("http://example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(os.Stderr, r.Body)
 }
