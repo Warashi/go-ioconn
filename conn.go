@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/k0kubun/pp/v3"
 )
@@ -24,7 +25,8 @@ var endian = binary.BigEndian
 type Conn struct {
 	rw io.ReadWriter
 
-	mu sync.Mutex
+  readMu sync.Mutex
+  writeMu sync.Mutex
 
 	listener  map[uint64]*Listener
 	usedPort  map[uint64]struct{}
@@ -55,71 +57,77 @@ func NewConn(w io.Writer, r io.Reader) *Conn {
 	return c
 }
 
-func (c *Conn) run() {
-	for {
-		p, err := readPacket(c.rw)
-		if errors.Is(err, io.EOF) {
-			continue
-		}
-		if err != nil {
-			log.Printf("error while reading packet: %v\n", err)
-			continue
-		}
-		log.Printf("packetType: %v", p.packetType)
+func (c *Conn) next() bool {
+	p, err := readPacket(c.rw)
+	if errors.Is(err, io.EOF) {
+		return false
+	}
+	if err != nil {
+		log.Printf("error while reading packet: %v\n", err)
+		return false
+	}
+	log.Printf("packetType: %v", p.packetType)
 
-		switch p.packetType {
-		case ack:
-			if listener, ok := c.listener[p.destinationPort]; ok {
-				go func() {
-					if err := c.writePacket(newPacket(
-						synAck,
-						p.destinationPort,
-						p.sourcePort,
-					)); err != nil {
-						return
-					}
-
-					pkey := port{
-						remote: p.sourcePort,
-						local:  p.destinationPort,
-					}
-
-					c.readBuf[pkey] = new(readBuffer)
-					c.writeInfo[pkey] = new(writeInfo)
-
-					listener.ack <- p
-				}()
-			}
-		case synAck:
-		case fin:
+	switch p.packetType {
+	case ack:
+		if listener, ok := c.listener[p.destinationPort]; ok {
 			go func() {
-				defer c.closeStream(p.sourcePort, p.destinationPort)
-				if buf, ok := c.readBuf[port{remote: p.sourcePort, local: p.destinationPort}]; ok {
-					buf.Close()
-				}
 				if err := c.writePacket(newPacket(
-					finAck,
+					synAck,
 					p.destinationPort,
 					p.sourcePort,
 				)); err != nil {
 					return
 				}
-			}()
-		case finAck:
-		case data:
-			if buf, ok := c.readBuf[port{remote: p.sourcePort, local: p.destinationPort}]; ok {
-				if err := buf.writePacket(p); err != nil {
-					log.Printf("error while writing packet: %v\n", err)
-					continue
+
+				pkey := port{
+					remote: p.sourcePort,
+					local:  p.destinationPort,
 				}
+
+				c.readBuf[pkey] = new(readBuffer)
+				c.writeInfo[pkey] = new(writeInfo)
+
+				listener.ack <- p
+			}()
+		}
+	case synAck:
+	case fin:
+		go func() {
+			defer c.closeStream(p.sourcePort, p.destinationPort)
+			if buf, ok := c.readBuf[port{remote: p.sourcePort, local: p.destinationPort}]; ok {
+				buf.Close()
+			}
+			if err := c.writePacket(newPacket(
+				finAck,
+				p.destinationPort,
+				p.sourcePort,
+			)); err != nil {
+				return
+			}
+		}()
+	case finAck:
+	case data:
+		if buf, ok := c.readBuf[port{remote: p.sourcePort, local: p.destinationPort}]; ok {
+			if err := buf.writePacket(p); err != nil {
+				log.Printf("error while writing packet: %v\n", err)
 			}
 		}
+	}
+
+	return true
+}
+
+func (c *Conn) run() {
+	for c.next() {
 	}
 }
 
 func (c *Conn) Listen(port uint64) (net.Listener, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.readMu.Lock()
+  c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	defer c.readMu.Unlock()
 
 	c.usedPort[port] = struct{}{}
 
@@ -182,8 +190,10 @@ func (a Addr) String() string {
 }
 
 func (c *Conn) Dial(dest uint64) (net.Conn, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.readMu.Lock()
+  c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	defer c.readMu.Unlock()
 
 	local := uint64(math.MaxUint64)
 	for i := range uint64(math.MaxUint64) {
@@ -237,8 +247,8 @@ func (c *Conn) writePacket(p *packet) error {
 }
 
 func (c *Conn) readStream(remote, local uint64, b []byte) (n int, err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
 
 	buf, ok := c.readBuf[port{
 		remote: remote,
@@ -248,13 +258,17 @@ func (c *Conn) readStream(remote, local uint64, b []byte) (n int, err error) {
 		return 0, io.EOF
 	}
 
-	n, err = buf.Read(b)
-	return n, err
+	for {
+		if n, err := buf.Read(b); n != 0 || err != nil {
+			return n, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (c *Conn) writeStream(remote, local uint64, b []byte) (n int, err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
 	info, ok := c.writeInfo[port{
 		remote: remote,
@@ -286,8 +300,8 @@ func (c *Conn) sendFin(remote, local uint64) (err error) {
 }
 
 func (c *Conn) closeStream(remote, local uint64) (err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 
 	pkey := port{
 		remote: remote,
