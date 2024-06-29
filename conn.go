@@ -33,11 +33,6 @@ type Conn struct {
 	usedPort  map[uint64]struct{}
 }
 
-type readWriter struct {
-	io.Reader
-	io.Writer
-}
-
 func NewConn(w io.Writer, r io.Reader) *Conn {
 	c := &Conn{
 		r: r,
