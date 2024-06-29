@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 )
 
 var (
@@ -22,6 +23,7 @@ type Conn struct {
 	w  io.Writer
 	mu sync.Mutex
 
+	closed   atomic.Bool
 	stream   map[port]*Stream
 	listener map[uint64]*Listener
 	usedPort map[uint64]struct{}
@@ -40,6 +42,11 @@ func NewConn(w io.Writer, r io.Reader) *Conn {
 	go c.run()
 
 	return c
+}
+
+func (c *Conn) Close() error {
+	c.closed.Store(true)
+	return nil
 }
 
 func (c *Conn) registerStream(s *Stream) {
@@ -90,7 +97,7 @@ func (c *Conn) next() bool {
 }
 
 func (c *Conn) run() {
-	for c.next() {
+	for !c.closed.Load() && c.next() {
 	}
 }
 
