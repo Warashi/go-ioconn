@@ -43,6 +43,9 @@ func NewConn(w io.Writer, r io.Reader) *Conn {
 }
 
 func (c *Conn) registerStream(s *Stream) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.stream[port{remote: s.remotePort, local: s.localPort}] = s
 }
 
@@ -188,7 +191,9 @@ func (c *Conn) Dial(dest uint64) (net.Conn, error) {
 		localPort:  local,
 		remotePort: dest,
 	}
-	c.registerStream(s)
+
+	// we cannot use registerStream because deadlock occurs
+	c.stream[port{remote: s.remotePort, local: s.localPort}] = s
 
 	return s, nil
 }
