@@ -11,21 +11,12 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+
+	"github.com/k0kubun/pp/v3"
 )
 
 var (
 	StreamNotOpen = errors.New("stream is not open")
-)
-
-type packetType uint8
-
-const (
-	undefined packetType = iota
-	ack
-	synAck
-	fin
-	finAck
-	data
 )
 
 var endian = binary.BigEndian
@@ -67,33 +58,60 @@ func NewConn(w io.Writer, r io.Reader) *Conn {
 func (c *Conn) run() {
 	for {
 		p, err := readPacket(c.rw)
+		if errors.Is(err, io.EOF) {
+			continue
+		}
 		if err != nil {
 			log.Printf("error while reading packet: %v\n", err)
 			continue
 		}
+		log.Printf("packetType: %v", p.packetType)
 
-		if buf, ok := c.readBuf[port{remote: p.sourcePort, local: p.destinationPort}]; ok {
-			if err := buf.writePacket(p); err != nil {
-				log.Printf("error while writing packet: %v\n", err)
-        continue
-			}
-		}
-
-		if p.packetType == ack {
+		switch p.packetType {
+		case ack:
 			if listener, ok := c.listener[p.destinationPort]; ok {
 				go func() {
-          if err := c.writePacket(&packet{
-						packetType:      synAck,
+					if err := c.writePacket(newPacket(
+						synAck,
+						p.destinationPort,
+						p.sourcePort,
+					)); err != nil {
+						return
+					}
 
-            // invert them
-						sourcePort:      p.destinationPort,
-						destinationPort: p.sourcePort,
-					}); err != nil {
-            return
-          }
+					pkey := port{
+						remote: p.sourcePort,
+						local:  p.destinationPort,
+					}
+
+					c.readBuf[pkey] = new(readBuffer)
+					c.writeInfo[pkey] = new(writeInfo)
 
 					listener.ack <- p
 				}()
+			}
+		case synAck:
+		case fin:
+			go func() {
+				defer c.closeStream(p.sourcePort, p.destinationPort)
+				if buf, ok := c.readBuf[port{remote: p.sourcePort, local: p.destinationPort}]; ok {
+					buf.Close()
+				}
+				if err := c.writePacket(newPacket(
+					finAck,
+					p.destinationPort,
+					p.sourcePort,
+				)); err != nil {
+					return
+				}
+			}()
+		case finAck:
+		case data:
+			if buf, ok := c.readBuf[port{remote: p.sourcePort, local: p.destinationPort}]; ok {
+				if err := buf.writePacket(p); err != nil {
+					log.Printf("error while writing packet: %v\n", err)
+					continue
+				}
 			}
 		}
 	}
@@ -106,6 +124,7 @@ func (c *Conn) Listen(port uint64) (net.Listener, error) {
 	c.usedPort[port] = struct{}{}
 
 	l := &Listener{
+		conn: c,
 		port: port,
 		ack:  make(chan *packet),
 		done: make(chan struct{}),
@@ -175,13 +194,7 @@ func (c *Conn) Dial(dest uint64) (net.Conn, error) {
 		}
 	}
 
-	p := &packet{
-		packetType:      ack,
-		sourcePort:      local,
-		destinationPort: dest,
-	}
-
-	if err := c.writePacket(p); err != nil {
+	if err := c.writePacket(newPacket(ack, local, dest)); err != nil {
 		return nil, err
 	}
 
@@ -235,7 +248,8 @@ func (c *Conn) readStream(remote, local uint64, b []byte) (n int, err error) {
 		return 0, io.EOF
 	}
 
-	return buf.Read(b)
+	n, err = buf.Read(b)
+	return n, err
 }
 
 func (c *Conn) writeStream(remote, local uint64, b []byte) (n int, err error) {
@@ -250,14 +264,10 @@ func (c *Conn) writeStream(remote, local uint64, b []byte) (n int, err error) {
 		return 0, io.EOF
 	}
 
-	p := &packet{
-		packetType:      data,
-		sourcePort:      local,
-		destinationPort: remote,
-		offset:          info.offset,
-		length:          uint16(len(b)),
-		data:            b,
-	}
+	p := newPacket(data, local, remote)
+	p.offset = info.offset
+	p.length = uint16(len(b))
+	p.data = b
 
 	if err := c.writePacket(p); err != nil {
 		return 0, err
@@ -266,6 +276,13 @@ func (c *Conn) writeStream(remote, local uint64, b []byte) (n int, err error) {
 	info.offset += uint64(p.length)
 
 	return int(p.length), nil
+}
+
+func (c *Conn) sendFin(remote, local uint64) (err error) {
+	if err := c.writePacket(newPacket(fin, local, remote)); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c *Conn) closeStream(remote, local uint64) (err error) {
@@ -279,16 +296,6 @@ func (c *Conn) closeStream(remote, local uint64) (err error) {
 	info, ok := c.writeInfo[pkey]
 	if !ok {
 		return nil
-	}
-
-	p := &packet{
-		packetType:      fin,
-		sourcePort:      local,
-		destinationPort: remote,
-	}
-
-	if err := c.writePacket(p); err != nil {
-		return err
 	}
 
 	info.closed = true
@@ -308,6 +315,8 @@ func (b *readBuffer) writePacket(p *packet) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	pp.Println(b)
+	pp.Println(p)
 	if p.offset != b.nextOffset {
 		b.reorderBuf = append(b.reorderBuf, p)
 		return nil
