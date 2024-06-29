@@ -1,17 +1,14 @@
 package ioconn
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
 	"log"
 	"math"
 	"net"
-	"slices"
 	"strconv"
 	"sync"
-	"time"
 )
 
 var (
@@ -23,7 +20,6 @@ var endian = binary.BigEndian
 type Conn struct {
 	r         io.Reader
 	readBufMu sync.Mutex
-	readBuf   map[port]*readBuffer
 
 	w           io.Writer
 	writeInfoMu sync.Mutex
@@ -43,7 +39,6 @@ func NewConn(w io.Writer, r io.Reader) *Conn {
 		stream:    make(map[port]*Stream),
 		listener:  make(map[uint64]*Listener),
 		usedPort:  make(map[uint64]struct{}),
-		readBuf:   make(map[port]*readBuffer),
 		writeInfo: make(map[port]*writeInfo),
 	}
 
@@ -76,7 +71,6 @@ func (c *Conn) next() bool {
 					local:  p.destinationPort,
 				}
 
-				c.readBuf[pkey] = new(readBuffer)
 				c.writeInfo[pkey] = new(writeInfo)
 				c.stream[pkey] = new(Stream)
 
@@ -87,9 +81,6 @@ func (c *Conn) next() bool {
 	case fin:
 		go func() {
 			defer c.closeStream(p.sourcePort, p.destinationPort)
-			if buf, ok := c.readBuf[port{remote: p.sourcePort, local: p.destinationPort}]; ok {
-				buf.Close()
-			}
 			if err := c.writePacket(newPacket(
 				finAck,
 				p.destinationPort,
@@ -221,7 +212,6 @@ func (c *Conn) Dial(dest uint64) (net.Conn, error) {
 	}
 	c.registerStream(s)
 
-	c.readBuf[pkey] = new(readBuffer)
 	c.writeInfo[pkey] = new(writeInfo)
 
 	return s, nil
@@ -301,70 +291,5 @@ func (c *Conn) closeStream(remote, local uint64) (err error) {
 		info.closed = true
 	}
 
-	return nil
-}
-
-type readBuffer struct {
-	closed     bool
-	buf        bytes.Buffer
-	mu         sync.RWMutex
-	nextOffset uint64
-	reorderBuf []*packet
-}
-
-func (b *readBuffer) writePacket(p *packet) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if p.offset != b.nextOffset {
-		b.reorderBuf = append(b.reorderBuf, p)
-		return nil
-	}
-
-	if _, err := b.buf.Write(p.data); err != nil {
-		return err
-	}
-	b.nextOffset = p.offset + uint64(p.length)
-
-	slices.SortFunc(b.reorderBuf, func(a, b *packet) int {
-		return int(a.offset) - int(b.offset)
-	})
-
-	for _, p := range b.reorderBuf {
-		if p.offset != b.nextOffset {
-			return nil
-		}
-
-		if _, err := b.buf.Write(p.data); err != nil {
-			return err
-		}
-		b.nextOffset = p.offset + uint64(p.length)
-	}
-
-	return nil
-}
-
-func (b *readBuffer) Read(by []byte) (n int, err error) {
-	for {
-		n, err = b.buf.Read(by)
-		if n == 0 && errors.Is(err, io.EOF) {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		break
-	}
-
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	if b.closed {
-		return n, io.EOF
-	}
-	return n, nil
-}
-
-func (b *readBuffer) Close() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.closed = true
 	return nil
 }
