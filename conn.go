@@ -21,16 +21,18 @@ var (
 var endian = binary.BigEndian
 
 type Conn struct {
-	r      io.Reader
+	r         io.Reader
 	readBufMu sync.Mutex
 	readBuf   map[port]*readBuffer
 
-	w       io.Writer
+	w           io.Writer
 	writeInfoMu sync.Mutex
-	writeInfo map[port]*writeInfo
+	writeInfo   map[port]*writeInfo
 
-	listener  map[uint64]*Listener
-	usedPort  map[uint64]struct{}
+	stream map[port]*Stream
+
+	listener map[uint64]*Listener
+	usedPort map[uint64]struct{}
 }
 
 func NewConn(w io.Writer, r io.Reader) *Conn {
@@ -38,6 +40,7 @@ func NewConn(w io.Writer, r io.Reader) *Conn {
 		r: r,
 		w: w,
 
+		stream:    make(map[port]*Stream),
 		listener:  make(map[uint64]*Listener),
 		usedPort:  make(map[uint64]struct{}),
 		readBuf:   make(map[port]*readBuffer),
@@ -47,6 +50,10 @@ func NewConn(w io.Writer, r io.Reader) *Conn {
 	go c.run()
 
 	return c
+}
+
+func (c *Conn) registerStream(s *Stream) {
+	c.stream[port{remote: s.remotePort, local: s.localPort}] = s
 }
 
 func (c *Conn) next() bool {
@@ -64,14 +71,6 @@ func (c *Conn) next() bool {
 	case ack:
 		if listener, ok := c.listener[p.destinationPort]; ok {
 			go func() {
-				if err := c.writePacket(newPacket(
-					synAck,
-					p.destinationPort,
-					p.sourcePort,
-				)); err != nil {
-					return
-				}
-
 				pkey := port{
 					remote: p.sourcePort,
 					local:  p.destinationPort,
@@ -79,6 +78,7 @@ func (c *Conn) next() bool {
 
 				c.readBuf[pkey] = new(readBuffer)
 				c.writeInfo[pkey] = new(writeInfo)
+				c.stream[pkey] = new(Stream)
 
 				listener.ack <- p
 			}()
@@ -100,10 +100,8 @@ func (c *Conn) next() bool {
 		}()
 	case finAck:
 	case data:
-		if buf, ok := c.readBuf[port{remote: p.sourcePort, local: p.destinationPort}]; ok {
-			if err := buf.writePacket(p); err != nil {
-				log.Printf("error while writing packet: %v\n", err)
-			}
+		if s, ok := c.stream[port{remote: p.sourcePort, local: p.destinationPort}]; ok {
+			s.pushQueue(p)
 		}
 	}
 
@@ -145,15 +143,26 @@ type Listener struct {
 
 func (l *Listener) Accept() (net.Conn, error) {
 	select {
-	case ack, ok := <-l.ack:
+	case p, ok := <-l.ack:
 		if !ok {
 			return nil, net.ErrClosed
 		}
-		return &Stream{
+		if err := l.conn.writePacket(newPacket(
+			synAck,
+			p.destinationPort,
+			p.sourcePort,
+		)); err != nil {
+			return nil, err
+		}
+
+		s := &Stream{
 			conn:       l.conn,
 			localPort:  l.port,
-			remotePort: ack.sourcePort,
-		}, nil
+			remotePort: p.sourcePort,
+		}
+		l.conn.registerStream(s)
+
+		return s, nil
 	case <-l.done:
 		return nil, net.ErrClosed
 	}
@@ -205,14 +214,17 @@ func (c *Conn) Dial(dest uint64) (net.Conn, error) {
 		local:  local,
 	}
 
-	c.readBuf[pkey] = new(readBuffer)
-	c.writeInfo[pkey] = new(writeInfo)
-
-	return &Stream{
+	s := &Stream{
 		conn:       c,
 		localPort:  local,
 		remotePort: dest,
-	}, nil
+	}
+	c.registerStream(s)
+
+	c.readBuf[pkey] = new(readBuffer)
+	c.writeInfo[pkey] = new(writeInfo)
+
+	return s, nil
 }
 
 type port struct {
@@ -236,26 +248,6 @@ func (c *Conn) writePacket(p *packet) error {
 	}
 
 	return nil
-}
-
-func (c *Conn) readStream(remote, local uint64, b []byte) (n int, err error) {
-	c.readBufMu.Lock()
-	defer c.readBufMu.Unlock()
-
-	buf, ok := c.readBuf[port{
-		remote: remote,
-		local:  local,
-	}]
-	if !ok {
-		return 0, io.EOF
-	}
-
-	for {
-		if n, err := buf.Read(b); n != 0 || err != nil {
-			return n, err
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
 }
 
 func (c *Conn) writeStream(remote, local uint64, b []byte) (n int, err error) {
@@ -299,12 +291,15 @@ func (c *Conn) closeStream(remote, local uint64) (err error) {
 		remote: remote,
 		local:  local,
 	}
-	info, ok := c.writeInfo[pkey]
-	if !ok {
-		return nil
+	s, ok := c.stream[pkey]
+	if ok {
+		s.closed.Store(true)
 	}
 
-	info.closed = true
+	info, ok := c.writeInfo[pkey]
+	if ok {
+		info.closed = true
+	}
 
 	return nil
 }
@@ -312,7 +307,7 @@ func (c *Conn) closeStream(remote, local uint64) (err error) {
 type readBuffer struct {
 	closed     bool
 	buf        bytes.Buffer
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	nextOffset uint64
 	reorderBuf []*packet
 }
@@ -350,12 +345,17 @@ func (b *readBuffer) writePacket(p *packet) error {
 }
 
 func (b *readBuffer) Read(by []byte) (n int, err error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	n, _ = b.buf.Read(by)
-	if n <= len(by) {
-		b.buf.Reset()
+	for {
+		n, err = b.buf.Read(by)
+		if n == 0 && errors.Is(err, io.EOF) {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		break
 	}
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	if b.closed {
 		return n, io.EOF
 	}
