@@ -18,12 +18,11 @@ var (
 var endian = binary.BigEndian
 
 type Conn struct {
-	r         io.Reader
-	readBufMu sync.Mutex
+	r  io.Reader
+	w  io.Writer
+	mu sync.Mutex
 
-	w           io.Writer
-	writeInfoMu sync.Mutex
-	writeInfo   map[port]*writeInfo
+	writeInfo map[port]*writeInfo
 
 	stream map[port]*Stream
 
@@ -66,6 +65,9 @@ func (c *Conn) next() bool {
 	case ack:
 		if listener, ok := c.listener[p.destinationPort]; ok {
 			go func() {
+				c.mu.Lock()
+				defer c.mu.Unlock()
+
 				pkey := port{
 					remote: p.sourcePort,
 					local:  p.destinationPort,
@@ -105,10 +107,8 @@ func (c *Conn) run() {
 }
 
 func (c *Conn) Listen(port uint64) (net.Listener, error) {
-	c.readBufMu.Lock()
-	c.writeInfoMu.Lock()
-	defer c.writeInfoMu.Unlock()
-	defer c.readBufMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	c.usedPort[port] = struct{}{}
 
@@ -182,10 +182,8 @@ func (a Addr) String() string {
 }
 
 func (c *Conn) Dial(dest uint64) (net.Conn, error) {
-	c.readBufMu.Lock()
-	c.writeInfoMu.Lock()
-	defer c.writeInfoMu.Unlock()
-	defer c.readBufMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	local := uint64(math.MaxUint64)
 	for i := range uint64(math.MaxUint64) {
@@ -241,8 +239,8 @@ func (c *Conn) writePacket(p *packet) error {
 }
 
 func (c *Conn) writeStream(remote, local uint64, b []byte) (n int, err error) {
-	c.writeInfoMu.Lock()
-	defer c.writeInfoMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	info, ok := c.writeInfo[port{
 		remote: remote,
@@ -274,8 +272,8 @@ func (c *Conn) sendFin(remote, local uint64) (err error) {
 }
 
 func (c *Conn) closeStream(remote, local uint64) (err error) {
-	c.writeInfoMu.Lock()
-	defer c.writeInfoMu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	pkey := port{
 		remote: remote,
