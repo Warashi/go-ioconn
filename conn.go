@@ -21,9 +21,10 @@ var (
 var endian = binary.BigEndian
 
 type Conn struct {
-	rw io.ReadWriter
+	r      io.Reader
+	readMu sync.Mutex
 
-	readMu  sync.Mutex
+	w       io.Writer
 	writeMu sync.Mutex
 
 	listener  map[uint64]*Listener
@@ -39,10 +40,8 @@ type readWriter struct {
 
 func NewConn(w io.Writer, r io.Reader) *Conn {
 	c := &Conn{
-		rw: readWriter{
-			Reader: r,
-			Writer: w,
-		},
+		r: r,
+		w: w,
 
 		listener:  make(map[uint64]*Listener),
 		usedPort:  make(map[uint64]struct{}),
@@ -56,7 +55,7 @@ func NewConn(w io.Writer, r io.Reader) *Conn {
 }
 
 func (c *Conn) next() bool {
-	p, err := readPacket(c.rw)
+	p, err := readPacket(c.r)
 	if errors.Is(err, io.EOF) {
 		return false
 	}
@@ -237,7 +236,7 @@ func (c *Conn) writePacket(p *packet) error {
 		return err
 	}
 
-	if _, err := c.rw.Write(mb); err != nil {
+	if _, err := c.w.Write(mb); err != nil {
 		return err
 	}
 
