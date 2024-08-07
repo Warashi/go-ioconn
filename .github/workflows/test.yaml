@@ -1,0 +1,38 @@
+name: Test
+on:
+  - push
+  - pull_request
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        go: [stable, oldstable]
+        os: [ubuntu-latest]
+    steps:
+      - name: Install Go using setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+      - run: go version
+      - uses: actions/checkout@v4
+      - run: go test -coverprofile=cover.out ./...
+      - name: Coveralls GitHub Action
+        if: github.event_name == 'pull_request' || github.ref_name == 'main'
+        uses: coverallsapp/github-action@v2
+        with:
+          file: cover.out
+          flag-name: Go-${{ matrix.os }}-${{ matrix.go }}
+          parallel: true
+  finish-coveralls:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref_name == 'main'
+    steps:
+      - name: Coveralls GitHub Action
+        uses: coverallsapp/github-action@v2
+        with:
+          parallel-finished: true
