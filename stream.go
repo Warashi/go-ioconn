@@ -12,6 +12,7 @@ import (
 
 var _ net.Conn = (*Stream)(nil)
 
+// queue is the generic queue implementation
 type queue[T any] struct {
 	mu      sync.Mutex
 	buf     []T
@@ -19,6 +20,7 @@ type queue[T any] struct {
 	length  int
 }
 
+// push an item to the queue
 func (q *queue[T]) push(v T) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -27,6 +29,7 @@ func (q *queue[T]) push(v T) {
 	q.length += 1
 }
 
+// pop an item from the queue and resize the backed array if needed
 func (q *queue[T]) pop() (T, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -48,6 +51,7 @@ func (q *queue[T]) pop() (T, bool) {
 	return ret, true
 }
 
+// Stream implements net.Conn
 type Stream struct {
 	conn *Conn
 
@@ -68,10 +72,12 @@ type Stream struct {
 	remotePort uint64
 }
 
+// pushQueue pushes the packet to its underlaying queue
 func (s *Stream) pushQueue(p *packet) {
 	s.queue.push(p)
 }
 
+// Read implements io.Reader
 func (s *Stream) Read(b []byte) (n int, err error) {
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
@@ -99,6 +105,7 @@ func (s *Stream) Read(b []byte) (n int, err error) {
 	}
 }
 
+// Write implements io.Writer
 func (s *Stream) Write(b []byte) (n int, err error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -114,6 +121,7 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 	return len(b), nil
 }
 
+// Close implements io.Closer
 func (s *Stream) Close() (err error) {
 	if old := s.closed.Swap(true); old {
 		return
@@ -124,17 +132,22 @@ func (s *Stream) Close() (err error) {
 	return s.conn.closeStream(s.remotePort, s.localPort)
 }
 
+// RemoteAddr implements net.Conn
 func (s *Stream) RemoteAddr() net.Addr { return Addr{s.remotePort} }
+// LocalAddr implements net.Conn
 func (s *Stream) LocalAddr() net.Addr  { return Addr{s.localPort} }
+// SetDeadline implements net.Conn
 func (s *Stream) SetDeadline(t time.Time) error {
 	s.SetReadDeadline(t)
 	s.SetWriteDeadline(t)
 	return nil
 }
+// SetReadDeadline implements net.Conn
 func (s *Stream) SetReadDeadline(t time.Time) error {
 	s.readDeadline.Store(&t)
 	return nil
 }
+// SetWriteDeadline implements net.Conn
 func (s *Stream) SetWriteDeadline(t time.Time) error {
 	s.writeDeadline.Store(&t)
 	return nil

@@ -13,11 +13,14 @@ import (
 )
 
 var (
+	// StreamNotOpen is returned when write/read operation occurred at closed stream
 	StreamNotOpen = errors.New("stream is not open")
 )
 
 var endian = binary.BigEndian
 
+// Conn represents the connection
+// this is not net.Conn
 type Conn struct {
 	r  io.Reader
 	w  io.Writer
@@ -29,6 +32,7 @@ type Conn struct {
 	usedPort map[uint64]struct{}
 }
 
+// NewConn creates the Conn over provided io.Writer and io.Reader
 func NewConn(w io.Writer, r io.Reader) *Conn {
 	c := &Conn{
 		r: r,
@@ -44,11 +48,13 @@ func NewConn(w io.Writer, r io.Reader) *Conn {
 	return c
 }
 
+// Close closes the connection
 func (c *Conn) Close() error {
 	c.closed.Store(true)
 	return nil
 }
 
+// registerStream registering the stream to underlaying connection
 func (c *Conn) registerStream(s *Stream) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -56,6 +62,7 @@ func (c *Conn) registerStream(s *Stream) {
 	c.stream[port{remote: s.remotePort, local: s.localPort}] = s
 }
 
+// next reads packet from connection and handle
 func (c *Conn) next() bool {
 	p, err := readPacket(c.r)
 	if errors.Is(err, io.EOF) {
@@ -96,11 +103,13 @@ func (c *Conn) next() bool {
 	return true
 }
 
+// run is the main loop
 func (c *Conn) run() {
 	for !c.closed.Load() && c.next() {
 	}
 }
 
+// Listen creates the net.Listener at given port
 func (c *Conn) Listen(port uint64) (net.Listener, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -119,6 +128,7 @@ func (c *Conn) Listen(port uint64) (net.Listener, error) {
 	return l, nil
 }
 
+// Listener implements net.Listener
 type Listener struct {
 	conn *Conn
 
@@ -127,6 +137,7 @@ type Listener struct {
 	done chan struct{}
 }
 
+// Accept is the implementation of net.Listener.Accept
 func (l *Listener) Accept() (net.Conn, error) {
 	select {
 	case p, ok := <-l.ack:
@@ -154,28 +165,35 @@ func (l *Listener) Accept() (net.Conn, error) {
 	}
 }
 
+// Close closes the listener
 func (l *Listener) Close() error {
 	delete(l.conn.listener, l.port)
 	close(l.done)
 	return nil
 }
 
+// Addr is the implementation of net.Listener.Addr
 func (l *Listener) Addr() net.Addr {
 	return Addr{port: l.port}
 }
 
+// Addr implements the net.Addr
 type Addr struct {
 	port uint64
 }
 
+// Network implements the net.Addr.Network
 func (a Addr) Network() string {
 	return "ioconn"
 }
 
+// String implements fmt.Stringer
 func (a Addr) String() string {
 	return "ioconn:" + strconv.FormatUint(a.port, 10)
 }
 
+// Dial to the given port.
+// the port should be a listened at the counterpart of the connection.
 func (c *Conn) Dial(dest uint64) (net.Conn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -205,11 +223,13 @@ func (c *Conn) Dial(dest uint64) (net.Conn, error) {
 	return s, nil
 }
 
+// port represents the pair of remote and local port
 type port struct {
 	remote uint64
 	local  uint64
 }
 
+// writePacket writes packet to the connection
 func (c *Conn) writePacket(p *packet) error {
 	mb, err := p.MarshalBinary()
 	if err != nil {
@@ -223,6 +243,7 @@ func (c *Conn) writePacket(p *packet) error {
 	return nil
 }
 
+// sendFin sends the fin packet to the connection
 func (c *Conn) sendFin(remote, local uint64) (err error) {
 	if err := c.writePacket(newPacket(fin, local, remote)); err != nil {
 		return err
@@ -230,6 +251,7 @@ func (c *Conn) sendFin(remote, local uint64) (err error) {
 	return nil
 }
 
+// closeStream closes the stream at given port pair
 func (c *Conn) closeStream(remote, local uint64) (err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

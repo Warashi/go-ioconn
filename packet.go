@@ -6,6 +6,7 @@ import (
 	"log"
 )
 
+// packetType represents the type of the packet
 //go:generate go run golang.org/x/tools/cmd/stringer@latest -type packetType
 type packetType uint8
 
@@ -18,6 +19,7 @@ const (
 	data
 )
 
+// packet represents the packet's information 
 type packet struct {
 	packetType      packetType
 	sourcePort      uint64
@@ -27,6 +29,7 @@ type packet struct {
 	data            []byte
 }
 
+// newPacket creates the packet
 func newPacket(typ packetType, local, remote uint64) *packet {
 	return &packet{
 		packetType:      typ,
@@ -35,6 +38,7 @@ func newPacket(typ packetType, local, remote uint64) *packet {
 	}
 }
 
+// newDataPacket creates the data type packet
 func newDataPacket(local, remote, offset uint64, b []byte) *packet {
 	p := newPacket(data, local, remote)
 	p.offset = offset
@@ -44,6 +48,7 @@ func newDataPacket(local, remote, offset uint64, b []byte) *packet {
 	return p
 }
 
+// readPacket reads the packet from io.Reader
 func readPacket(r io.Reader) (*packet, error) {
 	var header [17]byte
 	if _, err := r.Read(header[:]); err != nil {
@@ -77,6 +82,7 @@ func readPacket(r io.Reader) (*packet, error) {
 	return p, nil
 }
 
+// MarshalBinary serializes the packet as bytes
 func (p *packet) MarshalBinary() ([]byte, error) {
 	if int(p.length) != len(p.data) {
 		return nil, errors.New("data length is invalid")
@@ -96,6 +102,7 @@ func (p *packet) MarshalBinary() ([]byte, error) {
 	return b, nil
 }
 
+// UnmarshalBinary deserializes the packet from bytes
 func (p *packet) UnmarshalBinary(b []byte) error {
 	p.length = endian.Uint16(b[25:27])
 
